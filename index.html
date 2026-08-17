@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hello World</title>
+<style>
+  :root {
+    --bg-1: #0f172a;
+    --bg-2: #1e293b;
+    --accent-1: #818cf8;
+    --accent-2: #38bdf8;
+    --accent-3: #f472b6;
+    --text: #f8fafc;
+    --text-muted: #94a3b8;
+    --card-bg: rgba(255, 255, 255, 0.06);
+    --card-border: rgba(255, 255, 255, 0.14);
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    color: var(--text);
+    background: linear-gradient(-45deg, var(--bg-1), var(--bg-2), #111827, #1e1b4b);
+    background-size: 400% 400%;
+    animation: gradientShift 18s ease infinite;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+  }
+
+  @keyframes gradientShift {
+    0%   { background-position: 0% 50%; }
+    50%  { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  /* Floating background orbs */
+  .orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(60px);
+    opacity: 0.35;
+    pointer-events: none;
+  }
+
+  .orb-1 {
+    width: 320px;
+    height: 320px;
+    background: var(--accent-1);
+    top: -80px;
+    left: -80px;
+    animation: float1 14s ease-in-out infinite;
+  }
+
+  .orb-2 {
+    width: 260px;
+    height: 260px;
+    background: var(--accent-2);
+    bottom: -60px;
+    right: -60px;
+    animation: float2 16s ease-in-out infinite;
+  }
+
+  .orb-3 {
+    width: 200px;
+    height: 200px;
+    background: var(--accent-3);
+    top: 60%;
+    left: 70%;
+    animation: float3 12s ease-in-out infinite;
+  }
+
+  @keyframes float1 {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50%      { transform: translate(60px, 40px) scale(1.1); }
+  }
+
+  @keyframes float2 {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50%      { transform: translate(-50px, -30px) scale(1.15); }
+  }
+
+  @keyframes float3 {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50%      { transform: translate(-40px, 30px) scale(0.9); }
+  }
+
+  .card {
+    position: relative;
+    z-index: 1;
+    text-align: center;
+    padding: 3.5rem 3rem;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 20px;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+    max-width: 90vw;
+    animation: cardIn 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes cardIn {
+    from {
+      opacity: 0;
+      transform: translateY(24px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.3em;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 0 0 1rem;
+    animation: fadeIn 1s ease 0.3s both;
+  }
+
+  h1 {
+    margin: 0 0 0.75rem;
+    font-size: clamp(2.5rem, 6vw, 4.5rem);
+    font-weight: 700;
+    background: linear-gradient(90deg, var(--accent-1), var(--accent-2), var(--accent-3));
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shine 6s linear infinite, fadeIn 1s ease 0.45s both;
+  }
+
+  @keyframes shine {
+    to { background-position: 200% center; }
+  }
+
+  p.subtitle {
+    margin: 0 auto;
+    max-width: 32ch;
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    line-height: 1.6;
+    animation: fadeIn 1s ease 0.6s both;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .pulse {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent-2);
+    margin-right: 0.5rem;
+    box-shadow: 0 0 0 rgba(56, 189, 248, 0.6);
+    animation: pulse 2.2s infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.55); }
+    70%  { box-shadow: 0 0 0 14px rgba(56, 189, 248, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); }
+  }
+
+  .status {
+    margin-top: 1.75rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    animation: fadeIn 1s ease 0.75s both;
+  }
+
+  @media (max-width: 480px) {
+    .card {
+      padding: 2.5rem 1.5rem;
+    }
+  }
+</style>
+</head>
+<body>
+
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="orb orb-3"></div>
+
+  <main class="card">
+    <p class="eyebrow">GA-Test Template</p>
+    <h1>Hello, World</h1>
+    <p class="subtitle">A clean, self-contained HTML5 starting point &mdash; ready to be shaped into whatever comes next.</p>
+    <p class="status"><span class="pulse"></span>Static page &middot; no dependencies &middot; works offline</p>
+  </main>
+
+</body>
+</html>

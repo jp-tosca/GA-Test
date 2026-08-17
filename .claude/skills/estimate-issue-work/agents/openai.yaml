@@ -1,0 +1,4 @@
+interface:
+  display_name: "Estimate Issue Work"
+  short_description: "Estimate implementation work from repository code"
+  default_prompt: "Use $estimate-issue-work to assess the likely implementation effort for a proposed repository change."

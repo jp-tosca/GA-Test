@@ -1,0 +1,4 @@
+interface:
+  display_name: "Duplicate Issue Check"
+  short_description: "Find likely duplicate GitHub issues and PRs"
+  default_prompt: "Use $check-duplicate-issues to compare a proposed change with repository issue and pull-request history."
