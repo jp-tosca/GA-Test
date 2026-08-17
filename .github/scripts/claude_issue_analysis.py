@@ -176,16 +176,40 @@ def safe_markdown_text(value: str) -> str:
     return "".join(replacements.get(character, character) for character in value)
 
 
+class _MalformedAssessmentError(RuntimeError):
+    """Raised when Claude's response cannot be read as the expected JSON object."""
+
+
+def _strip_code_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 :]
+        if text.endswith("```"):
+            text = text[:-3]
+    return text.strip()
+
+
+def _extract_json_object(text: str) -> str:
+    text = _strip_code_fence(text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
 def _short_string(value: Any, field: str, max_length: int = 2_000) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"Claude assessment has an invalid {field}")
+        raise _MalformedAssessmentError(f"Claude assessment has an invalid {field}")
     normalized = " ".join(value.split())[:max_length]
     return safe_markdown_text(normalized)
 
 
 def _string_list(value: Any, field: str) -> tuple[str, ...]:
     if not isinstance(value, list):
-        raise RuntimeError(f"Claude assessment has an invalid {field}")
+        raise _MalformedAssessmentError(f"Claude assessment has an invalid {field}")
     return tuple(
         _short_string(item, field, 500)
         for item in value[:10]
@@ -236,7 +260,7 @@ def _render_assessment(
     if mode == "duplicates" or duplicate_matches:
         return _render_duplicates(duplicate_matches, duplicate_summary)
     if estimate is None:
-        raise RuntimeError("Claude assessment omitted the work estimate")
+        raise _MalformedAssessmentError("Claude assessment omitted the work estimate")
     if mode == "estimate":
         return _render_estimate(estimate)
     return f"{_render_duplicates((), duplicate_summary)}\n\n{_render_estimate(estimate)}"
@@ -248,18 +272,21 @@ def _parse_assessment(
     mode: str,
 ) -> tuple[str, tuple[DuplicateMatch, ...], WorkEstimate | None]:
     try:
-        assessment = json.loads(analysis_text)
+        assessment = json.loads(_extract_json_object(analysis_text))
     except json.JSONDecodeError as error:
-        raise RuntimeError("Claude returned an invalid JSON assessment") from error
+        preview = " ".join(analysis_text.split())[:300]
+        raise _MalformedAssessmentError(
+            f"Claude returned an invalid JSON assessment. Response started with: {preview!r}"
+        ) from error
     if not isinstance(assessment, dict):
-        raise RuntimeError("Claude returned an unexpected assessment")
+        raise _MalformedAssessmentError("Claude returned an unexpected assessment")
 
     duplicate_summary = _short_string(
         assessment.get("duplicate_summary"), "duplicate_summary"
     )
     raw_matches = assessment.get("duplicate_matches")
     if not isinstance(raw_matches, list):
-        raise RuntimeError("Claude assessment has invalid duplicate_matches")
+        raise _MalformedAssessmentError("Claude assessment has invalid duplicate_matches")
 
     candidates = {item.candidate_id: item for item in related_items}
     matches = []
@@ -280,7 +307,7 @@ def _parse_assessment(
     if needs_estimate:
         raw_estimate = assessment.get("estimate")
         if not isinstance(raw_estimate, dict):
-            raise RuntimeError("Claude assessment omitted the work estimate")
+            raise _MalformedAssessmentError("Claude assessment omitted the work estimate")
         size = raw_estimate.get("size")
         if size not in ALLOWED_ESTIMATE_SIZES:
             size = "unknown"
@@ -315,7 +342,7 @@ def _parse_response(
 
     content = response.get("content")
     if not isinstance(content, list):
-        raise RuntimeError("Claude API response did not contain message content")
+        raise _MalformedAssessmentError("Claude API response did not contain message content")
     text_blocks = [
         block["text"]
         for block in content
@@ -325,11 +352,19 @@ def _parse_response(
     ]
     analysis_text = "\n\n".join(text_blocks).strip()
     if not analysis_text:
-        raise RuntimeError("Claude API returned an empty analysis")
+        raise _MalformedAssessmentError("Claude API returned an empty analysis")
 
-    text, duplicate_matches, estimate = _parse_assessment(
-        analysis_text, related_items, mode
-    )
+    try:
+        text, duplicate_matches, estimate = _parse_assessment(
+            analysis_text, related_items, mode
+        )
+    except _MalformedAssessmentError as error:
+        stop_reason = response.get("stop_reason")
+        if stop_reason == "max_tokens":
+            raise _MalformedAssessmentError(
+                f"{error} (response was cut off at the max_tokens limit)"
+            ) from error
+        raise
     response_model = response.get("model")
     model = response_model if isinstance(response_model, str) else requested_model
     usage = response.get("usage")
@@ -405,8 +440,12 @@ def request_claude_analysis(
             last_error = error
         except urllib.error.URLError as error:
             last_error = error
+        except _MalformedAssessmentError as error:
+            last_error = error
 
         if attempt < 2:
             sleeper(2**attempt)
 
+    if isinstance(last_error, _MalformedAssessmentError):
+        raise RuntimeError(str(last_error)) from last_error
     raise RuntimeError("Claude API request failed after 3 attempts") from last_error

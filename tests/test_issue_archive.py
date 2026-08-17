@@ -264,6 +264,105 @@ class ClaudeAnalysisTests(unittest.TestCase):
         self.assertEqual(analysis.estimate.size, "medium")
         self.assertIn("Preliminary implementation estimate", analysis.text)
 
+    def test_parses_assessment_wrapped_in_markdown_fence(self):
+        assessment = {
+            "duplicate_matches": [],
+            "duplicate_summary": "No strong duplicate was found.",
+            "estimate": {
+                "size": "small",
+                "summary": "Localized change.",
+                "areas": ["src/export.py"],
+                "risks": [],
+            },
+        }
+
+        def opener(request, timeout):
+            return FakeResponse(
+                {
+                    "model": "claude-haiku-4-5-20251001",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Here is the assessment:\n```json\n"
+                            + json.dumps(assessment)
+                            + "\n```",
+                        }
+                    ],
+                    "usage": {"input_tokens": 300, "output_tokens": 80},
+                }
+            )
+
+        analysis = request_claude_analysis(
+            issue_event(), (), snapshot(), "test-secret", opener=opener
+        )
+
+        self.assertEqual(analysis.estimate.size, "small")
+
+    def test_retries_malformed_json_then_succeeds(self):
+        attempts = []
+        sleeps = []
+
+        def opener(request, timeout):
+            attempts.append(request)
+            if len(attempts) < 2:
+                return FakeResponse(
+                    {
+                        "model": "claude-haiku-4-5-20251001",
+                        "content": [
+                            {"type": "text", "text": "I cannot assess this issue."}
+                        ],
+                        "usage": {"input_tokens": 300, "output_tokens": 10},
+                    }
+                )
+            return FakeResponse(
+                claude_response(
+                    {
+                        "duplicate_matches": [],
+                        "duplicate_summary": "No duplicate.",
+                        "estimate": {
+                            "size": "unknown",
+                            "summary": "More information is required.",
+                            "areas": [],
+                            "risks": [],
+                        },
+                    }
+                )
+            )
+
+        analysis = request_claude_analysis(
+            issue_event(),
+            (),
+            snapshot(),
+            "test-secret",
+            opener=opener,
+            sleeper=sleeps.append,
+        )
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(analysis.estimate.size, "unknown")
+
+    def test_raises_readable_error_after_repeated_malformed_json(self):
+        def opener(request, timeout):
+            return FakeResponse(
+                {
+                    "model": "claude-haiku-4-5-20251001",
+                    "content": [
+                        {"type": "text", "text": "I cannot assess this issue."}
+                    ],
+                    "usage": {"input_tokens": 300, "output_tokens": 10},
+                }
+            )
+
+        with self.assertRaises(RuntimeError) as context:
+            request_claude_analysis(
+                issue_event(),
+                (),
+                snapshot(),
+                "test-secret",
+                opener=opener,
+                sleeper=lambda seconds: None,
+            )
+        self.assertIn("cannot assess this issue", str(context.exception))
+
     def test_retries_temporary_claude_errors(self):
         attempts = []
         sleeps = []
