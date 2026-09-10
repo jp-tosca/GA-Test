@@ -54,7 +54,7 @@ def main() -> None:
         )
 
     related_items = ()
-    if mode in {"duplicates", "full"}:
+    if mode in {"duplicates", "related", "full"}:
         related_items = collect_related_items(repository, issue_number, github_token)
 
     repository_snapshot = RepositorySnapshot(tree=(), files=())

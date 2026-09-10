@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -18,15 +19,29 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-haiku-4-5"
 MAX_TITLE_CHARACTERS = 500
 MAX_BODY_CHARACTERS = 12_000
-MAX_OUTPUT_TOKENS = 1_000
+MAX_OUTPUT_TOKENS = 1_500
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 ALLOWED_ESTIMATE_SIZES = {"small", "medium", "large", "unknown"}
-ALLOWED_MODES = {"duplicates", "estimate", "full"}
+ALLOWED_MODES = {"duplicates", "related", "estimate", "full"}
+ALLOWED_RELATIONSHIPS = {
+    "touches the same code",
+    "depends on",
+    "builds on",
+    "conflicts with",
+    "shares context",
+}
+DEFAULT_RELATIONSHIP = "related"
+NO_RELATED_SUMMARY = "No related issues or pull requests were identified."
 
 SKILLS_BY_MODE = {
     "duplicates": ("check-duplicate-issues",),
+    "related": ("find-related-issues",),
     "estimate": ("estimate-issue-work",),
-    "full": ("check-duplicate-issues", "estimate-issue-work"),
+    "full": (
+        "check-duplicate-issues",
+        "find-related-issues",
+        "estimate-issue-work",
+    ),
 }
 
 BASE_SYSTEM_PROMPT = """You triage GitHub work for repository maintainers. The
@@ -42,6 +57,12 @@ one JSON object in this exact shape:
     {"candidate_id": "issue-12", "reason": "short concrete reason"}
   ],
   "duplicate_summary": "short conclusion",
+  "related_matches": [
+    {"candidate_id": "issue-34",
+     "relationship": "touches the same code|depends on|builds on|conflicts with|shares context",
+     "reason": "short concrete reason"}
+  ],
+  "related_summary": "short conclusion",
   "estimate": {
     "size": "small|medium|large|unknown",
     "summary": "quick implementation assessment",
@@ -55,16 +76,25 @@ Do not include Markdown fences around the JSON."""
 
 MODE_INSTRUCTIONS = {
     "duplicates": (
-        "Perform only the duplicate/prior-solution check. Set estimate to null, "
-        "whether or not a strong match is found."
+        "Perform only the duplicate/prior-solution check. Set related_matches to "
+        "an empty array, related_summary to 'Related search not requested', and "
+        "estimate to null, whether or not a strong match is found."
+    ),
+    "related": (
+        "Perform only the related-work search. Set duplicate_matches to an empty "
+        "array, duplicate_summary to 'Duplicate check not requested', and "
+        "estimate to null."
     ),
     "estimate": (
-        "Perform only the implementation estimate. Set duplicate_matches to an "
-        "empty array and duplicate_summary to 'Duplicate check not requested'."
+        "Perform only the implementation estimate. Set duplicate_matches and "
+        "related_matches to empty arrays, duplicate_summary to 'Duplicate check "
+        "not requested', and related_summary to 'Related search not requested'."
     ),
     "full": (
-        "First check for strong duplicates or prior solutions. If any exist, set "
-        "estimate to null. Otherwise provide the preliminary implementation estimate."
+        "First check for strong duplicates or prior solutions. Then list "
+        "genuinely related work, never repeating an item already reported as a "
+        "duplicate. If a strong duplicate exists, set estimate to null. Otherwise "
+        "provide the preliminary implementation estimate."
     ),
 }
 
@@ -72,6 +102,13 @@ MODE_INSTRUCTIONS = {
 @dataclass(frozen=True)
 class DuplicateMatch:
     item: RelatedItem
+    reason: str
+
+
+@dataclass(frozen=True)
+class RelatedMatch:
+    item: RelatedItem
+    relationship: str
     reason: str
 
 
@@ -93,6 +130,7 @@ class ClaudeAnalysis:
     estimate: WorkEstimate | None
     checked_items: int
     inspected_files: int
+    related_matches: tuple[RelatedMatch, ...] = ()
     mode: str = "full"
 
 
@@ -217,6 +255,16 @@ def _string_list(value: Any, field: str) -> tuple[str, ...]:
     )
 
 
+def _activity_note(item: RelatedItem) -> str:
+    """Render the candidate's last-activity date, so age is visible to a reader.
+
+    Dates come from the GitHub API rather than from Claude, but are still
+    matched against a strict pattern before being rendered.
+    """
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})T[0-9:.]+Z?", item.updated_at or "")
+    return f", last active {match.group(1)}" if match else ""
+
+
 def _render_duplicates(
     duplicate_matches: tuple[DuplicateMatch, ...], duplicate_summary: str
 ) -> str:
@@ -230,7 +278,28 @@ def _render_duplicates(
         safe_title = safe_markdown_text(" ".join(item.title.split()))
         lines.append(
             f"- [{label} #{item.number}: {safe_title}]({item.url}) "
-            f"— **{item.state}**: {match.reason}"
+            f"— **{item.state}**{_activity_note(item)}: {match.reason}"
+        )
+    return "\n".join(lines).rstrip()
+
+
+def _render_related(
+    related_matches: tuple[RelatedMatch, ...], related_summary: str
+) -> str:
+    if not related_matches:
+        return f"### Related work\n\n{related_summary or NO_RELATED_SUMMARY}"
+
+    lines = ["### Related issues and pull requests", ""]
+    if related_summary:
+        lines.extend([related_summary, ""])
+    for match in related_matches:
+        item = match.item
+        label = "PR" if item.kind == "pull request" else "Issue"
+        safe_title = safe_markdown_text(" ".join(item.title.split()))
+        lines.append(
+            f"- [{label} #{item.number}: {safe_title}]({item.url}) "
+            f"\u2014 **{item.state}**{_activity_note(item)} "
+            f"\u00b7 _{match.relationship}_: {match.reason}"
         )
     return "\n".join(lines).rstrip()
 
@@ -255,22 +324,49 @@ def _render_assessment(
     mode: str,
     duplicate_matches: tuple[DuplicateMatch, ...],
     duplicate_summary: str,
+    related_matches: tuple[RelatedMatch, ...],
+    related_summary: str,
     estimate: WorkEstimate | None,
 ) -> str:
-    if mode == "duplicates" or duplicate_matches:
-        return _render_duplicates(duplicate_matches, duplicate_summary)
-    if estimate is None:
-        raise _MalformedAssessmentError("Claude assessment omitted the work estimate")
     if mode == "estimate":
+        if estimate is None:
+            raise _MalformedAssessmentError(
+                "Claude assessment omitted the work estimate"
+            )
         return _render_estimate(estimate)
-    return f"{_render_duplicates((), duplicate_summary)}\n\n{_render_estimate(estimate)}"
+
+    sections = []
+    if mode in {"duplicates", "full"}:
+        sections.append(_render_duplicates(duplicate_matches, duplicate_summary))
+    if mode in {"related", "full"}:
+        sections.append(_render_related(related_matches, related_summary))
+    if mode == "full" and not duplicate_matches:
+        if estimate is None:
+            raise _MalformedAssessmentError(
+                "Claude assessment omitted the work estimate"
+            )
+        sections.append(_render_estimate(estimate))
+    return "\n\n".join(sections)
+
+
+def _relationship(value: Any) -> str:
+    if isinstance(value, str):
+        normalized = " ".join(value.split()).lower()
+        if normalized in ALLOWED_RELATIONSHIPS:
+            return normalized
+    return DEFAULT_RELATIONSHIP
 
 
 def _parse_assessment(
     analysis_text: str,
     related_items: tuple[RelatedItem, ...],
     mode: str,
-) -> tuple[str, tuple[DuplicateMatch, ...], WorkEstimate | None]:
+) -> tuple[
+    str,
+    tuple[DuplicateMatch, ...],
+    tuple[RelatedMatch, ...],
+    WorkEstimate | None,
+]:
     try:
         assessment = json.loads(_extract_json_object(analysis_text))
     except json.JSONDecodeError as error:
@@ -281,26 +377,69 @@ def _parse_assessment(
     if not isinstance(assessment, dict):
         raise _MalformedAssessmentError("Claude returned an unexpected assessment")
 
-    duplicate_summary = _short_string(
-        assessment.get("duplicate_summary"), "duplicate_summary"
-    )
-    raw_matches = assessment.get("duplicate_matches")
-    if not isinstance(raw_matches, list):
-        raise _MalformedAssessmentError("Claude assessment has invalid duplicate_matches")
-
     candidates = {item.candidate_id: item for item in related_items}
-    matches = []
     seen = set()
-    if mode != "estimate":
-        for raw_match in raw_matches[:10]:
+
+    duplicate_summary = ""
+    matches = []
+    if mode != "related":
+        duplicate_summary = _short_string(
+            assessment.get("duplicate_summary"), "duplicate_summary"
+        )
+        raw_matches = assessment.get("duplicate_matches")
+        if not isinstance(raw_matches, list):
+            raise _MalformedAssessmentError(
+                "Claude assessment has invalid duplicate_matches"
+            )
+        if mode != "estimate":
+            for raw_match in raw_matches[:10]:
+                if not isinstance(raw_match, dict):
+                    continue
+                candidate_id = raw_match.get("candidate_id")
+                if candidate_id not in candidates or candidate_id in seen:
+                    continue
+                reason = _short_string(
+                    raw_match.get("reason"), "duplicate reason", 500
+                )
+                matches.append(
+                    DuplicateMatch(item=candidates[candidate_id], reason=reason)
+                )
+                seen.add(candidate_id)
+
+    related_summary = ""
+    related_hits = []
+    if mode in {"related", "full"}:
+        raw_related = assessment.get("related_matches")
+        if not isinstance(raw_related, list):
+            # Related work is supplementary in full triage: an omitted list should
+            # not discard an otherwise valid duplicate check and estimate.
+            if mode == "related":
+                raise _MalformedAssessmentError(
+                    "Claude assessment has invalid related_matches"
+                )
+            raw_related = []
+        for raw_match in raw_related[:10]:
             if not isinstance(raw_match, dict):
                 continue
             candidate_id = raw_match.get("candidate_id")
             if candidate_id not in candidates or candidate_id in seen:
                 continue
-            reason = _short_string(raw_match.get("reason"), "duplicate reason", 500)
-            matches.append(DuplicateMatch(item=candidates[candidate_id], reason=reason))
+            reason = _short_string(raw_match.get("reason"), "related reason", 500)
+            related_hits.append(
+                RelatedMatch(
+                    item=candidates[candidate_id],
+                    relationship=_relationship(raw_match.get("relationship")),
+                    reason=reason,
+                )
+            )
             seen.add(candidate_id)
+        raw_related_summary = assessment.get("related_summary")
+        if isinstance(raw_related_summary, str) and raw_related_summary.strip():
+            related_summary = _short_string(raw_related_summary, "related_summary")
+        elif mode == "related":
+            raise _MalformedAssessmentError(
+                "Claude assessment has an invalid related_summary"
+            )
 
     estimate = None
     needs_estimate = mode == "estimate" or (mode == "full" and not matches)
@@ -319,9 +458,18 @@ def _parse_assessment(
         )
 
     duplicate_matches = tuple(matches)
+    related_matches = tuple(related_hits)
     return (
-        _render_assessment(mode, duplicate_matches, duplicate_summary, estimate),
+        _render_assessment(
+            mode,
+            duplicate_matches,
+            duplicate_summary,
+            related_matches,
+            related_summary,
+            estimate,
+        ),
         duplicate_matches,
+        related_matches,
         estimate,
     )
 
@@ -355,7 +503,7 @@ def _parse_response(
         raise _MalformedAssessmentError("Claude API returned an empty analysis")
 
     try:
-        text, duplicate_matches, estimate = _parse_assessment(
+        text, duplicate_matches, related_matches, estimate = _parse_assessment(
             analysis_text, related_items, mode
         )
     except _MalformedAssessmentError as error:
@@ -377,6 +525,7 @@ def _parse_response(
         estimate=estimate,
         checked_items=len(related_items),
         inspected_files=inspected_files,
+        related_matches=related_matches,
         mode=mode,
     )
 

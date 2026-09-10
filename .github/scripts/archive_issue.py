@@ -14,6 +14,12 @@ from issue_context import collect_related_items, collect_repository_snapshot
 
 COMMENT_MARKER = "<!-- claude-issue-triage:v1 -->"
 
+# GitHub only records a close reason on newer issues, so a bare "closed" state is
+# genuinely unknown rather than a rejection. Old repositories hit this often.
+RESOLVED_STATES = {"merged", "closed (completed)"}
+DECLINED_STATES = {"closed (not_planned)", "closed (duplicate)", "closed (not merged)"}
+UNKNOWN_CLOSE_STATES = {"closed"}
+
 
 def require_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
@@ -77,6 +83,51 @@ def render_issue(
     return number, content
 
 
+def duplicate_guidance(analysis: ClaudeAnalysis) -> list[str]:
+    """Advise on the matches actually found.
+
+    The right next step depends on how the prior work ended: an open item should
+    be followed, delivered work suggests a regression, and abandoned work carries
+    a decision that should be revisited deliberately rather than by accident.
+    """
+    states = {match.item.state for match in analysis.duplicate_matches}
+    guidance = []
+    if "open" in states:
+        guidance.append(
+            "Work above is already open and tracks this request. If it covers "
+            "your report, please close this issue as a duplicate and follow that "
+            "item instead."
+        )
+    if states & RESOLVED_STATES:
+        guidance.append(
+            "Work above was already delivered. Please confirm whether you are "
+            "running a version that includes it. If you are, describe how the "
+            "current behavior differs so a maintainer can treat this as a "
+            "regression rather than a duplicate."
+        )
+    if states & DECLINED_STATES:
+        guidance.append(
+            "Work above was considered earlier and not carried out. Please read "
+            "that decision and explain what has changed since, so a maintainer "
+            "can reconsider it deliberately."
+        )
+    if states & UNKNOWN_CLOSE_STATES:
+        guidance.append(
+            "Work above was closed without a recorded reason. A maintainer should "
+            "confirm why before this issue is treated as a duplicate."
+        )
+    if not guidance:
+        guidance.append(
+            "If one of the items above already covers or resolves this request, "
+            "please close this issue as a duplicate."
+        )
+    guidance.append(
+        "If this request is materially different, please explain the distinction "
+        "so a maintainer can review it."
+    )
+    return guidance
+
+
 def render_issue_comment(analysis: ClaudeAnalysis) -> str:
     lines = [
         COMMENT_MARKER,
@@ -89,20 +140,24 @@ def render_issue_comment(analysis: ClaudeAnalysis) -> str:
         "",
     ]
     if analysis.duplicate_matches:
+        for sentence in duplicate_guidance(analysis):
+            lines.extend([sentence, ""])
+    elif analysis.related_matches:
         lines.extend(
             [
-                "If one of the items above already covers or resolves this request, "
-                "please close this issue as a duplicate. If it is materially different, "
-                "please explain the distinction so a maintainer can review it.",
+                "No strong duplicate was found in the bounded history checked, but the "
+                "related work listed above may provide context, prior discussion, or a "
+                "dependency worth reading first. The estimate is based on a quick code "
+                "snapshot and is not a delivery commitment.",
                 "",
             ]
         )
     else:
         lines.extend(
             [
-                "No strong duplicate was found in the bounded history checked. The "
-                "estimate above is based on a quick code snapshot and is not a delivery "
-                "commitment.",
+                "No strong duplicate was found in the bounded history checked, and no "
+                "related work stood out. The estimate above is based on a quick code "
+                "snapshot and is not a delivery commitment.",
                 "",
             ]
         )

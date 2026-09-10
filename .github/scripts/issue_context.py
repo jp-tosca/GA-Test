@@ -112,8 +112,12 @@ class RelatedItem:
     url: str
     body_excerpt: str
     updated_at: str
+    created_at: str = ""
 
     def as_prompt_data(self) -> dict[str, Any]:
+        # Dates let Claude judge how stale a match's context is. They are
+        # deliberately included: without them it cannot tell a live discussion
+        # from one that predates the current design.
         return {
             "candidate_id": self.candidate_id,
             "number": self.number,
@@ -122,6 +126,8 @@ class RelatedItem:
             "title": self.title,
             "url": self.url,
             "body_excerpt": self.body_excerpt,
+            "created_at": self.created_at,
+            "last_activity_at": self.updated_at,
         }
 
 
@@ -193,6 +199,7 @@ def _item_from_api(item: Any, kind: str) -> RelatedItem | None:
     body = item.get("body")
     body_excerpt = body[:MAX_RELATED_BODY_CHARACTERS] if isinstance(body, str) else ""
     updated_at = item.get("updated_at")
+    created_at = item.get("created_at")
     return RelatedItem(
         candidate_id=f"{'pr' if kind == 'pull request' else 'issue'}-{number}",
         number=number,
@@ -202,6 +209,7 @@ def _item_from_api(item: Any, kind: str) -> RelatedItem | None:
         url=url,
         body_excerpt=body_excerpt,
         updated_at=updated_at if isinstance(updated_at, str) else "",
+        created_at=created_at if isinstance(created_at, str) else "",
     )
 
 

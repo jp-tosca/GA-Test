@@ -1,0 +1,4 @@
+interface:
+  display_name: "Related Issue Search"
+  short_description: "Find related GitHub issues and PRs for context"
+  default_prompt: "Use $find-related-issues to find repository issues and pull requests related to a proposed change."

@@ -13,6 +13,7 @@ on:
         options:
           - full
           - duplicates
+          - related
           - estimate
       issue_number:
         description: Existing issue number (optional when a title is provided)

@@ -8,15 +8,34 @@ with the new issue to the Anthropic Messages API, and asks Claude to:
 
 1. Identify strong matches among existing issues and open, closed, or merged
    pull requests.
-2. If no strong duplicate exists, inspect the supplied code excerpts and provide
+2. List genuinely related work that is *not* a duplicate, with the relationship
+   that makes it worth reading: `touches the same code`, `depends on`,
+   `builds on`, `conflicts with`, or `shares context`.
+3. If no strong duplicate exists, inspect the supplied code excerpts and provide
    a preliminary small, medium, large, or unknown implementation estimate.
+
+Related work is reported whether or not a duplicate was found, and an item
+already reported as a duplicate is never repeated as related. Because related
+work is adjacent rather than the same request, it never suppresses the estimate.
+
+The reply's recommendation depends on how the matched work ended, because the
+right next step differs: open work should be followed, delivered work suggests a
+regression rather than a duplicate, and work that was declined carries a decision
+worth revisiting deliberately. GitHub records a close reason only on newer
+issues, so an issue closed without one is reported as unknown rather than assumed
+to be rejected. This matters most on long-lived repositories.
+
+Candidates are sent to Claude with their creation and last-activity dates, and
+those dates appear in the reply. Age is used to say how far prior context may
+have drifted from the current code, never to decide whether something is a
+duplicate: an old open request for the same behavior is still a duplicate.
 
 The workflow archives the issue and assessment in `issues/issue-N.md`, commits
 that file to the default branch as `github-actions[bot]`, and replies to the
 issue. A duplicate reply links the possible prior work and asks the author to
-close the issue if it is already covered. Otherwise, the reply explains the
-preliminary work estimate. Rerunning the workflow updates the bot's existing
-marked comment instead of creating another one.
+close the issue if it is already covered. Otherwise, the reply lists any related
+work and explains the preliminary work estimate. Rerunning the workflow updates
+the bot's existing marked comment instead of creating another one.
 
 The reply step still runs when the archive push is rejected, provided the Claude
 assessment was generated. This keeps branch-protection problems from suppressing
@@ -30,6 +49,7 @@ an incomplete snapshot or posting a new reply and can be rerun from **Actions**.
 The analysis procedures live in repository-local Agent Skills:
 
 - `.claude/skills/check-duplicate-issues/SKILL.md`
+- `.claude/skills/find-related-issues/SKILL.md`
 - `.claude/skills/estimate-issue-work/SKILL.md`
 
 Claude Code discovers these project skills from the repository. They can be
@@ -37,15 +57,17 @@ invoked directly without opening an issue:
 
 ```text
 /check-duplicate-issues 42
+/find-related-issues 42
 /estimate-issue-work 42
 /check-duplicate-issues Add CSV export support to reporting
+/find-related-issues Add CSV export support to reporting
 /estimate-issue-work Add CSV export support to reporting
 ```
 
 The automated workflow loads the instruction bodies from these same files into
 its Claude API system prompt. A duplicate-only run loads only the duplicate
-skill, an estimate-only run loads only the estimate skill, and full issue triage
-loads both. The Python scripts still perform authentication, bounded context
+skill, a related-only run loads only the related skill, an estimate-only run
+loads only the estimate skill, and full issue triage loads all three. The Python scripts still perform authentication, bounded context
 collection, candidate validation, safe rendering, and GitHub mutations.
 
 Changing a skill changes both future Claude Code usage and future automated API
@@ -117,8 +139,8 @@ appropriate; closing it does not trigger another analysis.
 
 1. Open **Actions > Claude issue triage > Run workflow**.
 2. Select the repository's reviewed default branch, then select `full`,
-   `duplicates`, or `estimate`. Do not run an unreviewed workflow branch with
-   repository secrets.
+   `duplicates`, `related`, or `estimate`. Do not run an unreviewed workflow
+   branch with repository secrets.
 3. Either enter an existing issue number, or leave it empty and provide a
    proposed title and optional requirement.
 4. Run the workflow and open its job summary to read the result.
@@ -179,17 +201,30 @@ branch protection or using an administrator's personal token.
   Anthropic key. The API key is sent only in the HTTPS authentication header.
 - Claude receives at most 50 recently updated issues and 50 recently updated
   pull requests, with each historical description limited to 600 characters.
-  This is a useful bounded duplicate check, not a guarantee that very old or
-  semantically distant prior work will always be found.
+  This is a useful bounded duplicate and relatedness check, not a guarantee
+  that very old or semantically distant prior work will always be found.
+- That cap, not any date filter, is what bounds how far back triage can see.
+  Candidates are ordered by last activity, so a long-dormant issue is reached
+  only if it was recently commented on. On a busy long-lived repository the
+  window can cover a short period of activity, and a genuine duplicate from
+  several years ago may fall outside it. Keyword search over the full history
+  would be required to close that gap; no date cutoff is applied, since one
+  would only narrow an already bounded window.
 - Repository inspection is limited to 25 relevant text files, 6,000 characters
   per file, and 40,000 characters total. Generated issue archives, dependency
   directories, skill definitions, binary files, symlinks, and sensitive-looking
   file names or key extensions are excluded.
 - The new issue body sent to Claude is limited to 12,000 characters, and Claude's
-  response is limited to 1,000 tokens. Temporary API failures are retried at most
+  response is limited to 1,500 tokens. Temporary API failures are retried at most
   three times.
-- Claude must select duplicates by candidate ID from the GitHub results. IDs it
-  invents are discarded, and all links in the comment come from GitHub's API.
+- Claude must select duplicates and related work by candidate ID from the GitHub
+  results. IDs it invents are discarded, at most 10 of each are kept, and all
+  links in the comment come from GitHub's API.
+- Relationship labels are restricted to a fixed vocabulary. An unrecognized label
+  is rendered as the neutral word `related` rather than as model-supplied text.
+- Related work is supplementary in full triage: if Claude omits the related list,
+  the duplicate check and estimate are still reported. In a related-only run the
+  omission is treated as a malformed response and retried.
 - The bot comment contains a hidden marker. On a workflow rerun, only a matching
   comment owned by `github-actions[bot]` is updated, preventing duplicate replies.
 - The generated Markdown preserves the original issue body and Claude output.
@@ -241,7 +276,7 @@ invalidate the exposed credential.
 - **Manual run rejects its input:** provide either a positive issue number or a
   proposed title. The requirement alone is not enough to identify the work.
 - **Claude Code does not show the skills:** open Claude Code from this repository
-  and confirm the two `SKILL.md` files are present on the checked-out branch.
+  and confirm the three `SKILL.md` files are present on the checked-out branch.
 
 ## Local tests
 
@@ -254,7 +289,8 @@ python -m unittest discover -s tests -v
 
 Validate the skill metadata with the skill validator available in the authoring
 environment. The repository tests also verify that each API mode loads the
-correct skill body and that full triage loads both.
+correct skill body, that full triage loads all three, and that related work is
+validated, deduplicated against duplicates, and escaped before rendering.
 
 ## References
 
