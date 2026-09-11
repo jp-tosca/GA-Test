@@ -28,11 +28,15 @@ from claude_issue_analysis import (  # noqa: E402
 from issue_context import (  # noqa: E402
     RelatedItem,
     _item_from_api,
+    _path_term_weights,
     RepositorySnapshot,
     collect_related_items,
+    collect_remote_repository_snapshot,
     collect_repository_snapshot,
     fetch_issue_event,
+    resolve_repository_snapshot,
 )
+import issue_context  # noqa: E402
 from post_issue_comment import COMMENT_MARKER, upsert_issue_comment  # noqa: E402
 import manual_triage  # noqa: E402
 
@@ -723,6 +727,192 @@ class RelatedWorkTests(unittest.TestCase):
         self.assertNotIn("please close this issue as a duplicate", comment)
 
 
+class TargetRepositoryTests(unittest.TestCase):
+    def _router(self, routes: dict, calls: list | None = None):
+        def opener(request, timeout):
+            url = request.full_url
+            if calls is not None:
+                calls.append(url)
+            for fragment, payload in routes.items():
+                if fragment in url:
+                    return FakeResponse(payload)
+            return FakeResponse([])
+
+        return opener
+
+    def _issue(self, number: int, title: str) -> dict:
+        return {
+            "number": number,
+            "title": title,
+            "html_url": f"https://github.com/IQSS/dataverse/issues/{number}",
+            "state": "closed",
+            "state_reason": "completed",
+            "body": "Old request.",
+            "created_at": "2014-07-09T00:00:00Z",
+            "updated_at": "2015-01-01T00:00:00Z",
+        }
+
+    def test_search_reaches_history_the_recency_page_cannot(self):
+        routes = {
+            "/search/issues": {"items": [self._issue(338, "download as one zip archive")]},
+            "/issues?": [self._issue(9000, "Something recent")],
+            "/pulls?": [],
+        }
+        items = collect_related_items(
+            "IQSS/dataverse",
+            42,
+            "github-token",
+            event=issue_event(),
+            source_repository="example/repo",
+            opener=self._router(routes),
+        )
+        numbers = [item.number for item in items]
+        self.assertIn(338, numbers)
+        # Search hits lead, because they are chosen for similarity.
+        self.assertEqual(numbers[0], 338)
+
+    def test_current_issue_number_is_kept_when_triaging_another_repository(self):
+        routes = {
+            "/search/issues": {"items": []},
+            "/issues?": [self._issue(42, "An unrelated dataverse issue #42")],
+            "/pulls?": [],
+        }
+        items = collect_related_items(
+            "IQSS/dataverse",
+            42,
+            "github-token",
+            event=issue_event(),
+            source_repository="example/repo",
+            opener=self._router(routes),
+        )
+        self.assertEqual([item.number for item in items], [42])
+
+    def test_current_issue_number_is_still_excluded_within_one_repository(self):
+        routes = {
+            "/search/issues": {"items": []},
+            "/issues?": [self._issue(42, "The issue being triaged")],
+            "/pulls?": [],
+        }
+        items = collect_related_items(
+            "example/repo",
+            42,
+            "github-token",
+            event=issue_event(),
+            source_repository="example/repo",
+            opener=self._router(routes),
+        )
+        self.assertEqual(items, ())
+
+    def test_duplicate_candidates_are_not_repeated(self):
+        routes = {
+            "/search/issues": {"items": [self._issue(338, "zip archive")]},
+            "/issues?": [self._issue(338, "zip archive")],
+            "/pulls?": [],
+        }
+        items = collect_related_items(
+            "IQSS/dataverse",
+            42,
+            "github-token",
+            event=issue_event(),
+            source_repository="example/repo",
+            opener=self._router(routes),
+        )
+        self.assertEqual(len(items), 1)
+
+    def test_failed_search_falls_back_to_recent_history(self):
+        def opener(request, timeout):
+            if "/search/issues" in request.full_url:
+                raise urllib.error.HTTPError(
+                    request.full_url, 422, "unprocessable", {}, None
+                )
+            if "/issues?" in request.full_url:
+                return FakeResponse([self._issue(9000, "Recent issue")])
+            return FakeResponse([])
+
+        items = collect_related_items(
+            "IQSS/dataverse",
+            42,
+            "github-token",
+            event=issue_event(),
+            source_repository="example/repo",
+            opener=opener,
+        )
+        self.assertEqual([item.number for item in items], [9000])
+
+    def test_common_path_terms_are_ignored_when_scoring_files(self):
+        paths = [f"src/standard/handler_{index}.java" for index in range(100)]
+        paths.append("src/zip/ZipDownloadService.java")
+        weights = _path_term_weights({"and", "zip"}, paths)
+        # "and" matches every "standard" path as a substring and carries no signal.
+        self.assertNotIn("and", weights)
+        self.assertIn("zip", weights)
+
+    def test_remote_snapshot_prefers_files_matching_the_issue(self):
+        import base64
+
+        tree = {
+            "tree": [
+                {"type": "blob", "path": "src/main/java/ZipDownloadService.java", "size": 100},
+                {"type": "blob", "path": "src/main/java/Unrelated.java", "size": 100},
+                {"type": "blob", "path": "Dockerfile", "size": 100},
+                {"type": "blob", "path": "secrets/private.pem", "size": 10},
+            ]
+        }
+
+        def opener(request, timeout):
+            url = request.full_url
+            if "/git/trees/" in url:
+                return FakeResponse(tree)
+            if "/contents/" in url:
+                return FakeResponse(
+                    {
+                        "encoding": "base64",
+                        "content": base64.b64encode(b"zip download code").decode(),
+                    }
+                )
+            return FakeResponse({"default_branch": "develop"})
+
+        event = {
+            "issue": {
+                "number": 1,
+                "title": "Support zip download of selected files",
+                "body": "Please add a zip download.",
+            }
+        }
+        snapshot = collect_remote_repository_snapshot(
+            "IQSS/dataverse", event, "github-token", opener=opener
+        )
+        selected = [path for path, _ in snapshot.files]
+        self.assertEqual(selected[0], "src/main/java/ZipDownloadService.java")
+        self.assertNotIn("secrets/private.pem", snapshot.tree)
+
+    def test_snapshot_source_follows_the_target_repository(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            if "/git/trees/" in request.full_url:
+                return FakeResponse({"tree": []})
+            return FakeResponse({"default_branch": "develop"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            local = resolve_repository_snapshot(
+                "example/repo", "example/repo", issue_event(), "t", Path(directory)
+            )
+            self.assertEqual(calls, [])
+            self.assertEqual(local.files, ())
+
+            resolve_repository_snapshot(
+                "IQSS/dataverse",
+                "example/repo",
+                issue_event(),
+                "github-token",
+                Path(directory),
+                opener=opener,
+            )
+        self.assertTrue(any("IQSS/dataverse" in url for url in calls))
+
+
 class CandidateAgeAndStateTests(unittest.TestCase):
     def _analysis_with_duplicate(self, state: str) -> ClaudeAnalysis:
         item = RelatedItem(
@@ -1043,7 +1233,7 @@ class ManualTriageTests(unittest.TestCase):
                 patch.dict(os.environ, environment, clear=False),
                 patch.object(
                     manual_triage,
-                    "collect_repository_snapshot",
+                    "resolve_repository_snapshot",
                     return_value=snapshot(),
                 ),
                 patch.object(

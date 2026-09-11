@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from claude_issue_analysis import ClaudeAnalysis, DEFAULT_MODEL, request_claude_analysis
-from issue_context import collect_related_items, collect_repository_snapshot
+from issue_context import collect_related_items, resolve_repository_snapshot
 
 
 COMMENT_MARKER = "<!-- claude-issue-triage:v1 -->"
@@ -179,15 +179,23 @@ def main() -> None:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     github_token = os.environ.get("GITHUB_TOKEN", "")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
+    # Issues are opened here, but may be triaged against another repository.
+    target_repository = os.environ.get("TRIAGE_TARGET_REPOSITORY", "").strip() or repository
     model = os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
 
     issue = event.get("issue")
     if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
         raise ValueError("Event payload does not contain a valid issue number")
     related_items = collect_related_items(
-        repository, issue["number"], github_token
+        target_repository,
+        issue["number"],
+        github_token,
+        event=event,
+        source_repository=repository,
     )
-    repository_snapshot = collect_repository_snapshot(Path.cwd(), event)
+    repository_snapshot = resolve_repository_snapshot(
+        target_repository, repository, event, github_token, Path.cwd()
+    )
     analysis = request_claude_analysis(
         event, related_items, repository_snapshot, api_key, model, mode="full"
     )

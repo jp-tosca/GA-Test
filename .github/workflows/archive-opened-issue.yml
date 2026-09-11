@@ -51,6 +51,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-haiku-4-5' }}
           GITHUB_TOKEN: ${{ github.token }}
+          # Issues are opened here but triaged against this repository's history
+          # and code. Reading a public repository needs no extra permissions.
+          TRIAGE_TARGET_REPOSITORY: ${{ vars.TRIAGE_TARGET_REPOSITORY || 'IQSS/dataverse' }}
           ISSUE_COMMENT_PATH: ${{ runner.temp }}/issue-comment.md
         run: python .github/scripts/archive_issue.py "$GITHUB_EVENT_PATH"
 
@@ -107,6 +110,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-haiku-4-5' }}
           GITHUB_TOKEN: ${{ github.token }}
+          TRIAGE_TARGET_REPOSITORY: ${{ vars.TRIAGE_TARGET_REPOSITORY || 'IQSS/dataverse' }}
           TRIAGE_MODE: ${{ inputs.mode }}
           TRIAGE_ISSUE_NUMBER: ${{ inputs.issue_number }}
           TRIAGE_TITLE: ${{ inputs.title }}

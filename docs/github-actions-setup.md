@@ -30,6 +30,10 @@ those dates appear in the reply. Age is used to say how far prior context may
 have drifted from the current code, never to decide whether something is a
 duplicate: an old open request for the same behavior is still a duplicate.
 
+Duplicates, related work, and the code read for the estimate all come from the
+target repository, which defaults to `IQSS/dataverse` and need not be the
+repository where the issue was opened.
+
 The workflow archives the issue and assessment in `issues/issue-N.md`, commits
 that file to the default branch as `github-actions[bot]`, and replies to the
 issue. A duplicate reply links the possible prior work and asks the author to
@@ -107,7 +111,32 @@ gh secret set ANTHROPIC_API_KEY
 Never use `gh secret set ANTHROPIC_API_KEY --body "the-key"`, because that can
 expose the value in shell history or process information.
 
-### 3. Optionally select a Claude model
+### 3. Optionally select the repository to triage against
+
+By default the workflow triages issues opened here against
+[`IQSS/dataverse`](https://github.com/IQSS/dataverse): the issue is read from
+this repository, while duplicates, related work, and the code estimate all come
+from the target. This lets a small repository act as an intake point for a much
+larger project.
+
+To target a different repository:
+
+1. Open **Settings > Secrets and variables > Actions > Variables**.
+2. Add a repository variable named `TRIAGE_TARGET_REPOSITORY`.
+3. Set its value to `owner/name`.
+
+Leave it unset to use the `IQSS/dataverse` default, or set it to this
+repository's own `owner/name` to triage local issues as before.
+
+The target must be a **public** repository. `GITHUB_TOKEN` can read public
+repositories without extra permissions or secrets, so no new credentials are
+needed; a private target would require a separate token and is not supported.
+
+When the target differs from this repository, the issue number being triaged is
+no longer excluded from candidates, because that number refers to an unrelated
+item in the target repository.
+
+### 4. Optionally select a Claude model
 
 The workflow defaults to `claude-haiku-4-5`, a fast and economical model suited
 to issue summarization. To choose another currently supported model:
@@ -120,7 +149,7 @@ to issue summarization. To choose another currently supported model:
 The model name is configuration, not a credential, so it belongs in a variable
 rather than a secret.
 
-### 4. Enable and test the workflow
+### 5. Enable and test the workflow
 
 1. Commit and push the workflow and scripts to the repository's default branch.
    The `issues` event cannot trigger a workflow that exists only on another
@@ -135,7 +164,7 @@ rather than a secret.
 The test consumes Anthropic API tokens. Delete or close the test issue as
 appropriate; closing it does not trigger another analysis.
 
-### 5. Run a check manually from GitHub Actions
+### 6. Run a check manually from GitHub Actions
 
 1. Open **Actions > Claude issue triage > Run workflow**.
 2. Select the repository's reviewed default branch, then select `full`,
@@ -199,19 +228,31 @@ branch protection or using an administrator's personal token.
   during a run.
 - Claude receives no tools and cannot access the runner, GitHub token, or
   Anthropic key. The API key is sent only in the HTTPS authentication header.
-- Claude receives at most 50 recently updated issues and 50 recently updated
-  pull requests, with each historical description limited to 600 characters.
-  This is a useful bounded duplicate and relatedness check, not a guarantee
-  that very old or semantically distant prior work will always be found.
-- That cap, not any date filter, is what bounds how far back triage can see.
-  Candidates are ordered by last activity, so a long-dormant issue is reached
-  only if it was recently commented on. On a busy long-lived repository the
-  window can cover a short period of activity, and a genuine duplicate from
-  several years ago may fall outside it. Keyword search over the full history
-  would be required to close that gap; no date cutoff is applied, since one
-  would only narrow an already bounded window.
-- Repository inspection is limited to 25 relevant text files, 6,000 characters
-  per file, and 40,000 characters total. Generated issue archives, dependency
+- Candidates come from two sources: keyword search over the target
+  repository's whole history, and a listing of recently updated issues and pull
+  requests. At most 100 candidates reach Claude, each description limited to
+  600 characters.
+- Search is what makes the check usable on a large repository. Recency alone is
+  badly insufficient at scale: on `IQSS/dataverse`, the most recent 100 items
+  contain only 38 issues and span roughly nine days out of more than 8,500
+  issues. Search reaches a matching issue from 2014 that recency never could.
+- Search is best effort. A rejected or failing query is ignored and triage
+  continues on the recency listing alone, rather than failing the run.
+- No date cutoff is applied. Reach is bounded by result caps rather than age,
+  and a cutoff would only narrow an already bounded window.
+- Coverage is still not a guarantee. Search matches words, so a duplicate
+  described in entirely different vocabulary can be missed, and a maintainer
+  should treat the result as a strong prompt rather than a complete search.
+- Repository inspection is limited to 25 relevant text files and 40,000
+  characters total: 6,000 characters per file locally, and 3,000 when reading a
+  remote repository, where breadth locates the right areas better than depth.
+- For a remote target, files are chosen without cloning: the file tree arrives
+  in one request, paths are scored, and only about 40 promising files are
+  downloaded and rescored on their real content. Terms that appear in more than
+  5% of paths are ignored, since in a large repository a short word like "and"
+  occurs inside hundreds of unrelated names and carries no signal.
+- A run against a remote target uses roughly 45 GitHub API calls, against the
+  5,000 per hour available to `GITHUB_TOKEN`. Generated issue archives, dependency
   directories, skill definitions, binary files, symlinks, and sensitive-looking
   file names or key extensions are excluded.
 - The new issue body sent to Claude is limited to 12,000 characters, and Claude's
